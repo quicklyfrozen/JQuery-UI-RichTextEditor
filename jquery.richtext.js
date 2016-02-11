@@ -21,6 +21,7 @@ $.widget("ui.richtext", {
 			"bold,italic,underline,strikeThrough",
 			"viewSource"
 		],
+        hint: false,
 		enter: function() { }
 	},
 
@@ -46,10 +47,12 @@ $.widget("ui.richtext", {
 	enable: function() {
 		$.Widget.prototype.enable.apply(this, arguments);
 		this._editor.setActive(true);
+        this._toolbars.enable();
 	},
 	disable: function() {
 		$.Widget.prototype.disable.apply(this, arguments);
 		this._editor.setActive(false);
+        this._toolbars.disable();
 	},
 	tools: function(tool) {
 		if ($.ui.richtext.Tools[tool]) {
@@ -86,7 +89,7 @@ var Toolbars = function(element, options, uiFn) {
 	this.srcElement.bind('richtextcaretmoved', function(e, ui) {
 		var tools = $.ui.richtext.Tools;
 		$.each(that.watchableTools, function(i,t) {
-			tools[t].update(ui);
+    	    tools[t].update(ui);
 		});
 	});
 	
@@ -134,7 +137,11 @@ $.extend(Toolbars.prototype, {
 					btn.button(button.options);
 					
 					if (tools[t].update) {
-						var _u = tools[t].update;
+                        // Only want to wrap update function once, otherwise cause chain of updates if RTE is destroyed/recreated
+                        if (!tools[t].updateOrig) {
+                            tools[t].updateOrig = tools[t].update;
+                        }
+						var _u = tools[t].updateOrig;
 						tools[t].update = function(ui) {
 							ui.button = btn;
 							_u(ui);
@@ -159,12 +166,20 @@ $.extend(Toolbars.prototype, {
 	},
 	
 	attach: function() {
-		this.element.width('100%' /*this.srcElement.outerWidth()*/).insertBefore(this.srcElement);
+		this.element.width('100%').insertBefore(this.srcElement);
 	},
 	
 	detach: function() {
 		this.element.remove();
-	}
+	},
+    
+    enable: function() {
+        this.element.find('.ui-buttonset').buttonset("option", "disabled", false);
+    },
+    
+    disable: function() {
+        this.element.find('.ui-buttonset').buttonset("option", "disabled", true);
+    }
 
 });
 
@@ -176,6 +191,7 @@ var Editor = function(element, options, uiFn) {
 	this.isDOMelement = (-1 == "textarea".indexOf(element[0].tagName.toLowerCase()));
 	this.srcElement = element;
 	this.options = options;
+    this.hintShown = false;
 
 	// add specialized functions
  	$.extend(this, this.options.sandboxed ? IFrameEditor : ElementEditor);
@@ -227,6 +243,10 @@ var Editor = function(element, options, uiFn) {
 	    };
 	}
 
+    $(this.contentWindow).bind('focus', function() {
+        that.showHint(false);
+    });
+    
 	$(this.contentWindow).bind('keydown', function(event) {
 		if (event.which == 13 && !event.shiftKey) {
 			return that.options.enter();
@@ -234,14 +254,15 @@ var Editor = function(element, options, uiFn) {
 	});
 	
 	$(this.contentWindow).bind('keyup mouseup', function() {
-		element.trigger('richtextcaretmoved', uiFn({caretPosition:that.getCursorPosition(), currentNode:$(that.getNodeAtCursor())}));
+		that.srcElement.trigger('richtextcaretmoved', uiFn({caretPosition:that.getCursorPosition(), currentNode:$(that.getNodeAtCursor())}));
 		// FIXME: Is there a better event we can catch (e.g. blur)?
 		that.saveSelection(that.contentWindow);
 	});
  
  	// FIXME IE hack... document.body for iframe is still null
- 	setTimeout(function() {        
-		that.updateHtmlElement();
+ 	setTimeout(function() {
+        if (that.valueFromSrcElement())
+		    that.updateHtmlElement();
 	}, 250);
 };
 
@@ -336,8 +357,9 @@ $.extend(Editor.prototype, {
 	valueFromSrcElement: function() {
 		return this.srcElement[this.isDOMelement ? 'html' : 'val']();
 	},
-
+    
 	dispose: function() {
+        this.srcElement.unbind();
 		this.updateSrcElement();
 		this.element.remove();
 		delete this.element;
@@ -353,14 +375,11 @@ var IFrameEditor = {
 	init: function() {
 		this.element = $("<iframe/>");
 
-		this.srcElement.wrap($('<div></div>').width('100%' /*this.srcElement.outerWidth() + 2*/).addClass('ui-richtext-wrapper')).after(this.element).hide();
+		this.srcElement.wrap($('<div></div>').width('100%').addClass('ui-richtext-wrapper')).after(this.element).hide();
 
 		this.contentWindow = this.element[0].contentWindow;
 		var _doc = this.contentWindow.document;
 		_doc.designMode = 'on';
-		//this._editor.open();
-		//this._editor.write(string);
-		//this._editor.close();
 
 		var contentWindow = $(".ui-richtext-wrapper iframe")[0].contentWindow;
 		contentWindow.onload = function() {
@@ -387,9 +406,27 @@ var IFrameEditor = {
 	},
 
 	setActive: function(b) {
+        this.showHint(b);
 		this.contentWindow.document.designMode = (b ? 'on' : 'off');
-		if (b) this.element.focus();
+        this.contentWindow.document.body.contentEditable = b;
+		//if (b) this.element.focus();
 	},
+
+    showHint: function(b) {
+        if (this.options.hint) {
+            if (b && !this.hintShown) {
+                var that = this;
+                setTimeout(function() {
+                    var text = "<span style='color:#999'>"+that.options.hint+"</span>";
+                    that.contentWindow.document.body.innerHTML = text;
+                    that.hintShown = true;
+                }, 250);
+            } else if (!b && this.hintShown) {
+                this.contentWindow.document.body.innerHTML = '';
+                this.hintShown = false;
+            }
+        }
+    },
 
     exec: function(cmd, args) {
 		this.contentWindow.focus();
@@ -409,7 +446,7 @@ var IFrameEditor = {
 	 * Return the value from the RTE area
 	 */
 	valueFromEditorElement: function() {
-		return this.contentWindow.document.body.innerHTML;
+		return this.hintShown ? '' : this.contentWindow.document.body.innerHTML;
 	},
 
 	value: function(html) {
@@ -433,7 +470,7 @@ var ElementEditor = {
 	init: function() {
 		this.element = $("<div/>");
 
-		this.srcElement.wrap($('<div></div>').width('100%' /*this.srcElement.outerWidth() + 2*/).addClass('ui-richtext-wrapper')).after(this.element).hide();
+		this.srcElement.wrap($('<div></div>').width('100%').addClass('ui-richtext-wrapper')).after(this.element).hide();
 
 		this.element.attr('contentEditable', true)
 			.css({'font-family': this.srcElement.css('font-family')});
@@ -445,11 +482,15 @@ var ElementEditor = {
 	},
 
 	setActive: function(b) {
-		this.element.focus();
+        this.showHint(b);
 		this.element.attr('contentEditable', !!b);
-		if (b) this.element.focus();
+		//if (b) this.element.focus();
 	},
 
+    showHint: function(b) {
+        // TODO
+    },
+    
 	exec: function(cmd, args) {
 		this.element.focus();
 		if (cmd != 'none')
@@ -465,7 +506,7 @@ var ElementEditor = {
 	 * Return the value from the RTE area
 	 */
 	valueFromEditorElement: function() {
-		return this.element.html();
+		return this.hintShown ? '' : this.element.html();
 	},
 
 	value: function(html) {
